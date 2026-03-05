@@ -1,71 +1,51 @@
-# CodeMentor README
+# CodeMentor - AI-Powered Coding Tutor
 
-This is the README for your extension "CodeMentor". After writing up a brief description, we recommend including the following sections.
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://marketplace.visualstudio.com/items?itemName=YOUR_PUBLISHER_ID.CodeMentor)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-## Features
+## 🎯 Features
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+### 🔍 AI-Powered Code Analysis
+- Get instant feedback on your code quality
+- Detects logic errors, performance issues, and style problems
+- Plain English explanations with real-world analogies
+- One-click quick fixes for common issues
 
-For example if there is an image subfolder under your extension project workspace:
+### 🛡️ Interview Integrity Suite
+- **Paste Shield** - Blocks copy-paste during technical interviews
+- **AI Detection** - Identifies AI-generated code patterns
+- **Focus Monitoring** - Tracks tab switching and window focus
+- **Session Recording** - Complete audit trail of coding activity
+- **Detailed Reports** - Professional JSON reports with timelines
 
-\!\[feature X\]\(images/feature-x.png\)
+### 📊 Visual Dashboard
+- Code quality score with live updates
+- Typing speed graph and activity timeline
+- Concept tracking and progress monitoring
+- Beautiful, dark-themed reports
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
-
-## Requirements
-
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
-
-## Extension Settings
-
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
-
-For example:
-
-This extension contributes the following settings:
-
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
-
-## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
-
-## Release Notes
-
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
+## 🔒 Privacy First
+- ✅ 100% local - No cloud, no tracking
+- ✅ Works offline - No internet required
+- ✅ Free forever - No API costs
+- ✅ Your code never leaves your machine
 
 ---
 
-## Following extension guidelines
+## 📋 **REQUIREMENTS (IMPORTANT!)**
 
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+### **1. VS Code Version**
+- VS Code 1.109.0 or higher
 
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+### **2. Ollama (Required for AI Features)**
+CodeMentor uses **Ollama** with **Llama 3.2** for local AI processing. You MUST install Ollama for the AI analysis to work.
 
-## Working with Markdown
+#### **Install Ollama:**
 
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+**Windows:**
+```bash
+# Download from website
+https://ollama.com/download/windows
 
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+# Or using winget
+winget install Ollama.Ollama
