@@ -5,6 +5,15 @@ import ollama from 'ollama';
 
 
 // Interview state management
+// ===========================================
+// ADD THIS INTERFACE (with your other interfaces)
+// ===========================================
+interface SessionEvent {
+    type: 'keystroke' | 'paste' | 'error' | 'pause' | 'focus-loss';
+    timestamp: Date;
+    lineNumber?: number;
+    details?: string;
+}
 interface InterviewSession {
     sessionId: string;
     code: string;
@@ -13,19 +22,50 @@ interface InterviewSession {
     interviewerId?: string;
     candidateName?: string;
     pasteAttempts: number;
+    focusLosses: number;
     events: SessionEvent[];
     aiDetectionScore?: number;
+    recording: {
+        keystrokes: KeystrokeRecord[];
+        timeline: TimelineEvent[];
+        fileSnapshots: FileSnapshot[];
+    };
 }
 
-interface SessionEvent {
-    type: 'keystroke' | 'paste' | 'error' | 'pause';
+interface KeystrokeRecord {
     timestamp: Date;
-    lineNumber?: number;
-    details?: string;
+    key: string;
+    line: number;
+    character: number;
+    timeFromStart: number; // milliseconds
 }
 
+interface TimelineEvent {
+    timestamp: Date;
+    type: 'file-open' | 'file-close' | 'focus-loss' | 'error' | 'pause';
+    details: string;
+    timeFromStart: number;
+}
+
+interface FileSnapshot {
+    timestamp: Date;
+    content: string;
+    reason: 'auto' | 'manual' | 'session-end';
+    timeFromStart: number;
+}
+// ===========================================
+// GLOBAL VARIABLES
+// ===========================================
 let activeSession: InterviewSession | null = null;
 let pasteAttempts = 0;
+let focusLossCount = 0;
+let focusDisposable: vscode.Disposable;
+let keystrokeDisposable: vscode.Disposable;
+let pauseTimeout: NodeJS.Timeout;
+let lastKeystrokeTime: number;
+let statusBarItem: vscode.StatusBarItem | undefined;  // 👈 ADD THIS LINE
+
+
 export function activate(context: vscode.ExtensionContext) {
     console.log('✅ CodeMentor is NOW ACTIVE!');
 
@@ -72,133 +112,456 @@ export function activate(context: vscode.ExtensionContext) {
         });
     });
 
-    context.subscriptions.push(helloCommand, analyzeCommand);
-}
-
-// Register paste blocker
-const pasteDisposable = vscode.commands.registerCommand('editor.action.clipboardPasteAction', async () => {
-    if (activeSession) {
-        // Interview mode is active - block paste
-        pasteAttempts++;
-        
-        // Log the paste attempt
+    // Register paste blocker
+    const pasteDisposable = vscode.commands.registerCommand('editor.action.clipboardPasteAction', async () => {
         if (activeSession) {
-            activeSession.pasteAttempts = pasteAttempts;
-            activeSession.events.push({
-                type: 'paste',
-                timestamp: new Date(),
-                details: 'Paste attempt blocked'
-            });
+            // Interview mode is active - block paste
+            pasteAttempts++;
+            
+            // Log the paste attempt
+            if (activeSession) {
+                activeSession.pasteAttempts = pasteAttempts;
+                activeSession.events.push({
+                    type: 'paste',
+                    timestamp: new Date(),
+                    details: 'Paste attempt blocked'
+                });
+            }
+            
+            vscode.window.showWarningMessage('⚠️ Pasting is disabled during interview mode');
+            return; // Block the paste
+        } else {
+            // Normal mode - allow paste
+            return vscode.commands.executeCommand('default:clipboard.paste');
+        }
+    });
+
+    // Generate interview code command
+    const generateCodeCommand = vscode.commands.registerCommand('CodeMentor.generateInterviewCode', async () => {
+        // Generate random 6-digit code
+        const interviewCode = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // Store in global storage
+        const panel = vscode.window.createWebviewPanel(
+            'interviewCode',
+            'Interview Code',
+            vscode.ViewColumn.Active,
+            { enableScripts: true }
+        );
+        
+        panel.webview.html = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <style>
+                    body { 
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                        padding: 40px;
+                        text-align: center;
+                        background: #1e1e1e;
+                        color: white;
+                    }
+                    .code-box {
+                        font-size: 72px;
+                        font-weight: bold;
+                        color: #007acc;
+                        background: #2d2d2d;
+                        padding: 30px;
+                        border-radius: 10px;
+                        letter-spacing: 10px;
+                        margin: 30px 0;
+                    }
+                    .instruction {
+                        color: #cccccc;
+                        font-size: 18px;
+                    }
+                    .warning {
+                        color: #ff9800;
+                        margin-top: 20px;
+                    }
+                </style>
+            </head>
+            <body>
+                <h1>🔐 Interview Code</h1>
+                <div class="code-box">${interviewCode}</div>
+                <p class="instruction">Share this code with the candidate</p>
+                <p class="instruction">They must enter it before starting</p>
+                <p class="warning">⏰ Code expires in 2 hours</p>
+            </body>
+            </html>
+        `;
+        
+        // Save code to global storage
+        await context.globalState.update('interviewCode', {code: interviewCode, timestamp: Date.now()});
+    });
+
+    // Enter interview code command
+    const enterCodeCommand = vscode.commands.registerCommand('CodeMentor.enterInterviewCode', async () => {
+        const code = await vscode.window.showInputBox({
+            prompt: 'Enter the 6-digit interview code',
+            placeHolder: '123456',
+            password: true,
+            validateInput: (text) => {
+                if (!text) return 'Code is required';
+                if (!/^\d{6}$/.test(text)) return 'Please enter a valid 6-digit code';
+                return null;
+            }
+        });
+        
+        if (code) {
+            const stored = context.globalState.get<{code: string, timestamp: number}>('interviewCode');
+            
+            if (!stored || stored.code !== code) {
+                vscode.window.showErrorMessage('❌ Invalid code');
+                return;
+            }
+            
+            if (Date.now() - stored.timestamp > 2 * 60 * 60 * 1000) {
+                vscode.window.showErrorMessage('❌ Code expired');
+                return;
+            }
+            
+            const startTime = new Date();
+            activeSession = {
+                sessionId: `INT-${Date.now().toString().slice(-8)}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`,
+                code: code,
+                startTime: startTime,
+                pasteAttempts: 0,
+                focusLosses: 0,
+                events: [],
+                recording: {
+                    keystrokes: [],
+                    timeline: [],
+                    fileSnapshots: []
+                }
+            };
+            
+            // Log session start
+            if (activeSession && activeSession.recording) {
+                activeSession.recording.timeline.push({
+                    timestamp: startTime,
+                    type: 'file-open',
+                    details: 'Session started',
+                    timeFromStart: 0
+                });
+            }
+            
+            takeSnapshot('auto');
+            
+            vscode.window.showInformationMessage('✅ Interview mode activated! All activity is being recorded.');
+            
+            // 👇 FIXED STATUS BAR CODE 👇
+            // Dispose old status bar if exists
+            if (statusBarItem) {
+                statusBarItem.dispose();
+            }
+            
+            // Create new status bar
+            statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+            statusBarItem.text = "$(record) REC ● Interview Mode";
+            statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+            statusBarItem.tooltip = "Session recording in progress";
+            statusBarItem.show();
+            
+            // Start all tracking
+            startKeystrokeRecording();
+            startFocusMonitoring(context);
+            startPauseDetection();
+            startFileTracking();
+        }
+    });
+
+    // End session command
+    const endSessionCommand = vscode.commands.registerCommand('CodeMentor.endInterviewSession', async () => {
+        if (!activeSession) {
+            vscode.window.showErrorMessage('No active interview session');
+            return;
         }
         
-        vscode.window.showWarningMessage('⚠️ Pasting is disabled during interview mode');
-        return; // Block the paste
-    } else {
-        // Normal mode - allow paste
-        return vscode.commands.executeCommand('default:clipboard.paste');
+        takeSnapshot('session-end');
+        activeSession.endTime = new Date();
+        
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+            const code = editor.document.getText();
+            activeSession.aiDetectionScore = await detectAIGenerated(code);
+        }
+        
+        const stats = calculateSessionStats(activeSession);
+        const report = generateEnhancedReport(activeSession, stats);
+        showReportPanel(report);
+        saveReportToFile(report);
+        
+        // 👇 CLEAN UP STATUS BAR 👇
+        if (statusBarItem) {
+            statusBarItem.dispose();
+            statusBarItem = undefined;
+        }
+        
+        activeSession = null;
+        vscode.window.showInformationMessage('Interview session ended. Full recording saved.');
+    });
+
+    context.subscriptions.push(helloCommand, analyzeCommand, pasteDisposable, generateCodeCommand, enterCodeCommand, endSessionCommand);
+}
+
+
+function startKeystrokeRecording() {
+    if (!activeSession) return;
+    
+    const startTime = activeSession.startTime.getTime();
+    
+    keystrokeDisposable = vscode.workspace.onDidChangeTextDocument((event) => {
+        if (!activeSession) return;
+        
+        const change = event.contentChanges[0];
+        if (!change) return;
+        
+        const currentTime = new Date();
+        const timeFromStart = currentTime.getTime() - startTime;
+        
+        // Record keystroke
+        activeSession.recording.keystrokes.push({
+            timestamp: currentTime,
+            key: change.text,
+            line: change.range.start.line,
+            character: change.range.start.character,
+            timeFromStart: timeFromStart
+        });
+        
+        // Check for errors in real-time
+        checkForErrors(event.document);
+        
+        // Auto-snapshot every 50 keystrokes
+        if (activeSession.recording.keystrokes.length % 50 === 0) {
+            takeSnapshot('auto');
+        }
+    });
+}
+
+function checkForErrors(document: vscode.TextDocument) {
+    if (!activeSession) return;
+    
+    const text = document.getText();
+    
+    // Simple error detection
+    if (text.includes('==') && !text.includes('===')) {
+        activeSession.recording.timeline.push({
+            timestamp: new Date(),
+            type: 'error',
+            details: 'Potential error: Using == instead of ===',
+            timeFromStart: Date.now() - activeSession.startTime.getTime()
+        });
     }
-});
+}
 
-// Generate interview code command
-const generateCodeCommand = vscode.commands.registerCommand('CodeMentor.generateInterviewCode', async () => {
-    // Generate random 6-digit code
-    const interviewCode = Math.floor(100000 + Math.random() * 900000).toString();
-    
-    // Store in global storage
-    const context = vscode.extensions.getExtension('CodeMentor')?.exports;
-    // Save code with timestamp (valid for 2 hours)
-    
-    const panel = vscode.window.createWebviewPanel(
-        'interviewCode',
-        'Interview Code',
-        vscode.ViewColumn.Active,
-        { enableScripts: true }
-    );
-    
-    panel.webview.html = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body { 
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                    padding: 40px;
-                    text-align: center;
-                    background: #1e1e1e;
-                    color: white;
-                }
-                .code-box {
-                    font-size: 72px;
-                    font-weight: bold;
-                    color: #007acc;
-                    background: #2d2d2d;
-                    padding: 30px;
-                    border-radius: 10px;
-                    letter-spacing: 10px;
-                    margin: 30px 0;
-                }
-                .instruction {
-                    color: #cccccc;
-                    font-size: 18px;
-                }
-                .warning {
-                    color: #ff9800;
-                    margin-top: 20px;
-                }
-            </style>
-        </head>
-        <body>
-            <h1>🔐 Interview Code</h1>
-            <div class="code-box">${interviewCode}</div>
-            <p class="instruction">Share this code with the candidate</p>
-            <p class="instruction">They must enter it before starting</p>
-            <p class="warning">⏰ Code expires in 2 hours</p>
-        </body>
-        </html>
-    `;
-    
-    // Save code to global storage
-    // await context.globalState.update('interviewCode', {code: interviewCode, timestamp: Date.now()});
-});
 
-// Enter interview code command
-const enterCodeCommand = vscode.commands.registerCommand('CodeMentor.enterInterviewCode', async () => {
-    const code = await vscode.window.showInputBox({
-        prompt: 'Enter the 6-digit interview code',
-        placeHolder: '123456',
-        validateInput: (text) => {
-            return text && /^\d{6}$/.test(text) ? null : 'Please enter a valid 6-digit code';
+function startFileTracking() {
+    if (!activeSession) return;
+    
+    const startTime = activeSession.startTime.getTime();
+    
+    // Track file opens
+    const openDisposable = vscode.workspace.onDidOpenTextDocument((document) => {
+        if (!activeSession) return;
+        
+        activeSession.recording.timeline.push({
+            timestamp: new Date(),
+            type: 'file-open',
+            details: `Opened: ${document.fileName}`,
+            timeFromStart: Date.now() - startTime
+        });
+    });
+    
+    // Track file closes
+    const closeDisposable = vscode.workspace.onDidCloseTextDocument((document) => {
+        if (!activeSession) return;
+        
+        activeSession.recording.timeline.push({
+            timestamp: new Date(),
+            type: 'file-close',
+            details: `Closed: ${document.fileName}`,
+            timeFromStart: Date.now() - startTime
+        });
+    });
+}
+
+function takeSnapshot(reason: 'auto' | 'manual' | 'session-end') {
+    if (!activeSession) return;
+    
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) return;
+    
+    activeSession.recording.fileSnapshots.push({
+        timestamp: new Date(),
+        content: editor.document.getText(),
+        reason: reason,
+        timeFromStart: Date.now() - activeSession.startTime.getTime()
+    });
+}
+
+
+// ===========================================
+// START PAUSE DETECTION (FIXED)
+// ===========================================
+function startPauseDetection() {
+    if (!activeSession) return;
+    
+    const startTime = activeSession.startTime.getTime();
+    lastKeystrokeTime = Date.now();
+    
+    // Clear any existing timeout
+    if (pauseTimeout) {
+        clearTimeout(pauseTimeout);
+    }
+    
+    const resetTimer = () => {
+        clearTimeout(pauseTimeout);
+        
+        const now = Date.now();
+        const pauseDuration = now - lastKeystrokeTime;
+        
+        if (pauseDuration > 3000 && lastKeystrokeTime !== now) {
+            if (activeSession && activeSession.recording) {
+                activeSession.recording.timeline.push({
+                    timestamp: new Date(lastKeystrokeTime + pauseDuration),
+                    type: 'pause',
+                    details: `Paused for ${Math.round(pauseDuration/1000)} seconds`,
+                    timeFromStart: lastKeystrokeTime - startTime + pauseDuration
+                });
+            }
+        }
+        
+        lastKeystrokeTime = now;
+        
+        pauseTimeout = setTimeout(resetTimer, 3000);
+    };
+    
+    // Monitor keystrokes
+    const pauseDisposable = vscode.workspace.onDidChangeTextDocument(() => {
+        resetTimer();
+    });
+    
+    // Start the timer
+    resetTimer();
+    
+    // Add to subscriptions if needed (optional)
+    // context.subscriptions.push(pauseDisposable);
+}
+
+
+// ===========================================
+// FOCUS MONITORING FUNCTION
+// ===========================================
+// ===========================================
+// ENHANCED FOCUS MONITORING - CATCHES ALL TAB SWITCHES
+// ===========================================
+function startFocusMonitoring(context: vscode.ExtensionContext) {
+    if (!activeSession) return;
+    
+    focusLossCount = 0;
+    console.log('👁️ Enhanced focus monitoring started');
+    
+    // Dispose existing if any
+    if (focusDisposable) {
+        focusDisposable.dispose();
+    }
+    
+    // METHOD 1: Window focus change (Alt+Tab, clicking other windows)
+    const windowFocusDisposable = vscode.window.onDidChangeWindowState((state) => {
+        if (!activeSession) return;
+        
+        if (!state.focused) {
+            handleFocusLoss('Window focus lost');
         }
     });
     
-    if (code) {
-        // Validate code (check against stored in global state)
-        // const stored = await context.globalState.get('interviewCode');
+    // METHOD 2: Document visibility change (switching tabs in VS Code)
+    const visibilityDisposable = vscode.workspace.onDidChangeTextDocument((e) => {
+        // This is just to keep the connection alive
+    });
+    
+    // METHOD 3: Check active editor changes (switching between files)
+    let lastActiveEditor = vscode.window.activeTextEditor;
+    const editorChangeDisposable = vscode.window.onDidChangeActiveTextEditor((editor) => {
+        if (!activeSession) return;
         
-        // For demo, accept any 6-digit code
-        vscode.window.showInformationMessage('✅ Interview mode activated! Pasting is now disabled.');
+        if (lastActiveEditor && editor && lastActiveEditor.document.fileName !== editor.document.fileName) {
+            // User switched to different file
+            handleFocusLoss(`Switched from ${lastActiveEditor.document.fileName} to ${editor.document.fileName}`);
+        }
+        lastActiveEditor = editor;
+    });
+    
+    // METHOD 4: Check if VS Code is in background
+    const interval = setInterval(() => {
+        if (!activeSession) return;
         
-        // Create new session
-        activeSession = {
-            sessionId: Date.now().toString(),
-            code: code,
-            startTime: new Date(),
-            pasteAttempts: 0,
-            events: []
-        };
+        // This is a hack to detect if VS Code is not focused
+        if (!vscode.window.state.focused) {
+            handleFocusLoss('VS Code in background');
+        }
+    }, 1000);
+    
+    function handleFocusLoss(reason: string) {
+        if (!activeSession) return;
         
-        // Show status bar item
-        const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-        statusBarItem.text = "$(shield) Interview Mode Active";
-        statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-        statusBarItem.show();
+        focusLossCount++;
+        const currentTime = new Date();
+        const timeFromStart = currentTime.getTime() - activeSession.startTime.getTime();
         
-        // Start tracking
-        startSessionTracking();
-    }else {
-                vscode.window.showErrorMessage('❌ Invalid or expired interview code');
+        console.log(`⚠️ Focus lost #${focusLossCount}: ${reason} at ${Math.round(timeFromStart/1000)}s`);
+        
+        // Add to events
+        activeSession.events.push({
+            type: 'focus-loss',
+            timestamp: currentTime,
+            details: `${reason} (${focusLossCount})`
+        });
+        
+        // Add to timeline
+        activeSession.recording.timeline.push({
+            timestamp: currentTime,
+            type: 'focus-loss',
+            details: `${reason} (${focusLossCount})`,
+            timeFromStart: timeFromStart
+        });
+        
+        // Update focus count
+        activeSession.focusLosses = focusLossCount;
+        
+        // Show warning with count
+        if (focusLossCount === 1) {
+            vscode.window.showWarningMessage(
+                '⚠️ Warning: VS Code focus lost! Stay in the editor during interview!'
+            );
+        } else if (focusLossCount === 2) {
+            vscode.window.showWarningMessage(
+                '⚠️ Second focus loss detected! This affects your interview integrity.'
+            );
+        } else if (focusLossCount >= 3) {
+            vscode.window.showErrorMessage(
+                `🚨 CRITICAL: ${focusLossCount} focus losses detected! This will appear in your report.`
+            );
+            
+            // Change status bar to red
+            if (statusBarItem) {
+                statusBarItem.text = "$(alert) VIOLATION: Tab Switched";
+                statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
             }
-});
+        }
+    }
+    
+    // Store disposables
+    context.subscriptions.push(
+        windowFocusDisposable,
+        visibilityDisposable,
+        editorChangeDisposable
+    );
+    
+    // Store interval for cleanup
+    context.subscriptions.push({ dispose: () => clearInterval(interval) });
+}
 
 // REAL AI ANALYSIS USING OLLAMA
 async function realAIAnalysis(code: string, language: string): Promise<any[]> {
@@ -404,24 +767,94 @@ async function detectAIGenerated(code: string): Promise<number> {
     }
 }
 
-function generateReport(session: InterviewSession): any {
-    // Calculate metrics
-    const totalKeystrokes = session.events.filter(e => e.type === 'keystroke').length;
-    const pauses = session.events.filter(e => e.type === 'pause').length;
-    const duration = (session.endTime!.getTime() - session.startTime.getTime()) / 1000 / 60; // minutes
+// ===========================================
+// CALCULATE SESSION STATISTICS
+// ===========================================
+function calculateSessionStats(session: InterviewSession) {
+    const startTime = session.startTime.getTime();
+    const endTime = session.endTime ? session.endTime.getTime() : Date.now();
+    const durationMs = endTime - startTime;
+    const durationMinutes = Math.round(durationMs / 1000 / 60);
     
+    // Keystroke stats
+    const keystrokes = session.recording.keystrokes;
+    const totalKeystrokes = keystrokes.length;
+    const avgKeystrokesPerMinute = durationMinutes > 0 ? Math.round(totalKeystrokes / durationMinutes) : 0;
+    
+    // Typing speed variations
+    let typingSpeed: number[] = [];
+    if (keystrokes.length > 0) {
+        const windowSize = 50; // keystrokes per window
+        for (let i = 0; i < keystrokes.length; i += windowSize) {
+            const window = keystrokes.slice(i, i + windowSize);
+            if (window.length > 1) {
+                const timeDiff = window[window.length - 1].timeFromStart - window[0].timeFromStart;
+                const speed = timeDiff > 0 ? Math.round((window.length / timeDiff) * 60000) : 0;
+                typingSpeed.push(speed);
+            }
+        }
+    }
+    
+    // Timeline stats
+    const timeline = session.recording.timeline;
+    const filesOpened = timeline.filter(t => t.type === 'file-open').length;
+    const errors = timeline.filter(t => t.type === 'error').length;
+    const pauses = timeline.filter(t => t.type === 'pause').length;
+    const snapshots = session.recording.fileSnapshots.length;
+    
+    return {
+        durationMinutes,
+        totalKeystrokes,
+        avgKeystrokesPerMinute,
+        typingSpeed,
+        filesOpened,
+        errors,
+        pauses,
+        snapshots
+    };
+}
+
+function generateEnhancedReport(session: InterviewSession, stats: any) {
     return {
         sessionId: session.sessionId,
         startTime: session.startTime,
         endTime: session.endTime,
-        durationMinutes: Math.round(duration),
-        pasteAttempts: session.pasteAttempts,
-        aiProbability: session.aiDetectionScore || 50,
-        totalKeystrokes,
-        pauses,
-        events: session.events,
+        durationMinutes: stats.durationMinutes,
+        
+        integrity: {
+            pasteAttempts: session.pasteAttempts,
+            focusLosses: session.focusLosses,
+            aiProbability: session.aiDetectionScore || 50
+        },
+        
+        typing: {
+            totalKeystrokes: stats.totalKeystrokes,
+            avgKeystrokesPerMinute: stats.avgKeystrokesPerMinute,
+            typingSpeed: stats.typingSpeed,
+            pauses: stats.pauses
+        },
+        
+        activity: {
+            filesOpened: stats.filesOpened,
+            errorsDetected: stats.errors,
+            snapshots: stats.snapshots
+        },
+        
+        timeline: session.recording.timeline.map(t => ({
+            time: new Date(t.timeFromStart).toISOString().substr(14, 5), // MM:SS format
+            type: t.type,
+            details: t.details
+        })),
+        
+        codeEvolution: session.recording.fileSnapshots.map(s => ({
+            time: new Date(s.timeFromStart).toISOString().substr(14, 5),
+            content: s.content.length > 100 ? s.content.substring(0, 100) + '...' : s.content,
+            reason: s.reason
+        })),
+        
         verdict: session.pasteAttempts > 0 ? "⚠️ Paste attempts detected" :
                  (session.aiDetectionScore || 0) > 70 ? "🔴 High AI probability" :
+                 session.focusLosses > 3 ? "⚠️ Multiple tab switches" :
                  "✅ Genuine candidate"
     };
 }
@@ -639,26 +1072,129 @@ function showResultsPanel(context: vscode.ExtensionContext, errors: any[], fileN
     `;
 }
 
-
-
+// ===========================================
+// SHOW REPORT PANEL (WITHOUT PRINT BUTTON)
+// ===========================================
 function showReportPanel(report: any) {
     const panel = vscode.window.createWebviewPanel(
         'interviewReport',
-        '📊 Interview Session Report',
+        '📊 CodeMentor Interview Report',
         vscode.ViewColumn.Beside,
-        { enableScripts: true }
+        { 
+            enableScripts: true,
+            localResourceRoots: [] 
+        }
     );
     
-    // Calculate visual indicators
-    const aiBarWidth = Math.min(report.aiProbability, 100);
-    const aiBarColor = report.aiProbability > 70 ? '#f44336' : 
-                       report.aiProbability > 40 ? '#ff9800' : '#4CAF50';
+    // Handle messages from webview
+   // Handle messages from webview
+panel.webview.onDidReceiveMessage(
+    async (message) => {
+        if (message.command === 'exportPDF') {
+            const homedir = require('os').homedir();
+            const reportsDir = path.join(homedir, 'CodeMentor-Reports');
+            const fs = require('fs');
+            
+            // Create folder if it doesn't exist
+            if (!fs.existsSync(reportsDir)) {
+                fs.mkdirSync(reportsDir, { recursive: true });
+            }
+            
+            // Find the latest report file
+            const files = fs.readdirSync(reportsDir);
+            const reportFiles = files.filter((f: string) => f.endsWith('.json'));
+            
+            if (reportFiles.length > 0) {
+                // Sort by date (newest first)
+                reportFiles.sort().reverse();
+                const latestReport = reportFiles[0];
+                const filePath = path.join(reportsDir, latestReport);
+                
+                // Open the folder and highlight the file
+                const uri = vscode.Uri.file(filePath);
+                vscode.commands.executeCommand('revealFileInOS', uri);
+                
+                vscode.window.showInformationMessage(`📁 Report: ${latestReport}`);
+            } else {
+                // Just open folder if no reports
+                const uri = vscode.Uri.file(reportsDir);
+                vscode.commands.executeCommand('revealFileInOS', uri);
+                vscode.window.showInformationMessage('📁 Reports folder opened');
+            }
+        }
+    },
+    undefined,
+    []
+);
+    // Safely access nested properties
+    const sessionId = report.sessionId || 'N/A';
+    const startTime = report.startTime ? new Date(report.startTime).toLocaleString() : 'N/A';
+    const duration = report.durationMinutes || 0;
     
-    const pasteBarWidth = Math.min(report.pasteAttempts * 33, 100);
+    // Integrity metrics
+    const pasteAttempts = report.integrity?.pasteAttempts || 0;
+    const focusLosses = report.integrity?.focusLosses || 0;
+    const aiProbability = report.integrity?.aiProbability || 0;
     
-    // Verdict with emoji
-    let verdictEmoji = report.verdict.includes('Genuine') ? '✅' : 
-                       report.verdict.includes('High AI') ? '🤖⚠️' : '⚠️';
+    // Typing metrics
+    const totalKeystrokes = report.typing?.totalKeystrokes || 0;
+    const avgKeystrokes = report.typing?.avgKeystrokesPerMinute || 0;
+    const pauses = report.typing?.pauses || 0;
+    
+    // Activity metrics
+    const filesOpened = report.activity?.filesOpened || 0;
+    const errorsDetected = report.activity?.errorsDetected || 0;
+    const snapshots = report.activity?.snapshots || 0;
+    
+    // Verdict
+    const verdict = report.verdict || "Report generated";
+    const verdictColor = verdict.includes('Genuine') ? '#4CAF50' : 
+                         verdict.includes('High AI') ? '#f44336' : 
+                         verdict.includes('Paste') ? '#ff9800' : 
+                         verdict.includes('tab') ? '#ff9800' : '#2196F3';
+    
+    // Calculate integrity score
+    const integrityScore = Math.max(0, Math.min(100, 
+        100 - (pasteAttempts * 15) - (focusLosses * 10) - (aiProbability * 0.3)
+    ));
+    
+    // Generate timeline HTML if available
+    let timelineHtml = '';
+    if (report.timeline && report.timeline.length > 0) {
+        timelineHtml = report.timeline.map((event: any) => {
+            const icon = event.type === 'file-open' ? '📂' :
+                        event.type === 'file-close' ? '📕' :
+                        event.type === 'focus-loss' ? '👁️' :
+                        event.type === 'error' ? '❌' :
+                        event.type === 'pause' ? '⏸️' : '📝';
+            
+            const color = event.type === 'error' ? '#f44336' :
+                         event.type === 'focus-loss' ? '#ff9800' :
+                         event.type === 'pause' ? '#2196F3' : '#4CAF50';
+            
+            return `
+                <div style="display: flex; align-items: center; padding: 8px; border-bottom: 1px solid #404040; color: white;">
+                    <span style="width: 60px; color: #888;">${event.time || '00:00'}</span>
+                    <span style="width: 40px; color: ${color};">${icon}</span>
+                    <span style="flex: 1; color: #ddd;">${event.details || ''}</span>
+                </div>
+            `;
+        }).join('');
+    } else {
+        timelineHtml = '<div style="color: #888; padding: 20px; text-align: center;">No timeline data available</div>';
+    }
+    
+    // Generate typing speed graph
+    let typingGraphHtml = '';
+    if (report.typing?.typingSpeed && report.typing.typingSpeed.length > 0) {
+        const maxSpeed = Math.max(...report.typing.typingSpeed, 1);
+        typingGraphHtml = report.typing.typingSpeed.map((speed: number) => {
+            const height = Math.max(4, (speed / maxSpeed) * 60);
+            return `<div style="flex: 1; height: 60px; display: flex; align-items: flex-end; justify-content: center;">
+                <div style="width: 80%; background: #4CAF50; height: ${height}px; border-radius: 3px 3px 0 0;" title="${speed} keystrokes"></div>
+            </div>`;
+        }).join('');
+    }
     
     panel.webview.html = `
         <!DOCTYPE html>
@@ -671,350 +1207,264 @@ function showReportPanel(report: any) {
                     box-sizing: border-box;
                 }
                 body {
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    min-height: 100vh;
+                    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+                    background: #1e1e1e;
                     padding: 30px 20px;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
                 }
-                .report-card {
-                    max-width: 800px;
-                    width: 100%;
-                    background: white;
-                    border-radius: 20px;
-                    padding: 30px;
-                    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                    animation: slideIn 0.5s ease-out;
-                }
-                @keyframes slideIn {
-                    from {
-                        opacity: 0;
-                        transform: translateY(30px);
-                    }
-                    to {
-                        opacity: 1;
-                        transform: translateY(0);
-                    }
+                .report-container {
+                    max-width: 1000px;
+                    margin: 0 auto;
                 }
                 .header {
-                    display: flex;
-                    align-items: center;
-                    margin-bottom: 30px;
-                    padding-bottom: 20px;
-                    border-bottom: 2px solid #f0f0f0;
-                }
-                .header-icon {
-                    font-size: 48px;
-                    margin-right: 20px;
-                    background: linear-gradient(135deg, #667eea, #764ba2);
-                    width: 80px;
-                    height: 80px;
-                    border-radius: 50%;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    border-radius: 15px 15px 0 0;
+                    padding: 25px;
                     color: white;
                 }
-                .header-title h1 {
-                    color: #333;
+                .header h1 {
                     font-size: 28px;
-                    margin-bottom: 5px;
+                    margin-bottom: 10px;
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
                 }
-                .header-title p {
-                    color: #666;
+                .header .session-id {
+                    background: rgba(255,255,255,0.2);
+                    padding: 5px 15px;
+                    border-radius: 20px;
                     font-size: 14px;
+                    display: inline-block;
                 }
                 .stats-grid {
                     display: grid;
-                    grid-template-columns: repeat(3, 1fr);
-                    gap: 20px;
-                    margin-bottom: 30px;
+                    grid-template-columns: repeat(4, 1fr);
+                    gap: 15px;
+                    margin: 20px 0;
                 }
                 .stat-card {
-                    background: #f8f9fa;
-                    border-radius: 15px;
+                    background: #2d2d2d;
+                    border-radius: 12px;
                     padding: 20px;
-                    text-align: center;
-                    transition: transform 0.3s;
-                    border: 1px solid #e0e0e0;
-                }
-                .stat-card:hover {
-                    transform: translateY(-5px);
-                    box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+                    border: 1px solid #404040;
                 }
                 .stat-icon {
-                    font-size: 32px;
+                    font-size: 24px;
                     margin-bottom: 10px;
-                }
-                .stat-value {
-                    font-size: 32px;
-                    font-weight: bold;
-                    color: #333;
-                    margin-bottom: 5px;
                 }
                 .stat-label {
-                    color: #666;
-                    font-size: 14px;
-                }
-                .progress-section {
-                    background: #f8f9fa;
-                    border-radius: 15px;
-                    padding: 25px;
-                    margin-bottom: 30px;
-                    border: 1px solid #e0e0e0;
-                }
-                .progress-item {
-                    margin-bottom: 20px;
-                }
-                .progress-header {
-                    display: flex;
-                    justify-content: space-between;
-                    margin-bottom: 8px;
-                    color: #555;
-                    font-weight: 500;
-                }
-                .progress-bar-bg {
-                    width: 100%;
-                    height: 12px;
-                    background: #e0e0e0;
-                    border-radius: 6px;
-                    overflow: hidden;
-                }
-                .progress-bar-fill {
-                    height: 100%;
-                    border-radius: 6px;
-                    transition: width 1s ease-in-out;
-                    animation: fillBar 1.5s ease-out;
-                }
-                @keyframes fillBar {
-                    from { width: 0; }
-                    to { width: ${aiBarWidth}%; }
-                }
-                .verdict-box {
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    border-radius: 15px;
-                    padding: 25px;
-                    margin-bottom: 25px;
-                    color: white;
-                    text-align: center;
-                    animation: pulse 2s infinite;
-                }
-                @keyframes pulse {
-                    0% { transform: scale(1); }
-                    50% { transform: scale(1.02); }
-                    100% { transform: scale(1); }
-                }
-                .verdict-box h2 {
-                    font-size: 28px;
-                    margin-bottom: 10px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    gap: 10px;
-                }
-                .verdict-box p {
-                    font-size: 16px;
-                    opacity: 0.9;
-                }
-                .details-grid {
-                    display: grid;
-                    grid-template-columns: repeat(2, 1fr);
-                    gap: 15px;
-                    margin-bottom: 25px;
-                }
-                .detail-item {
-                    background: #f8f9fa;
-                    border-radius: 10px;
-                    padding: 15px;
-                    border: 1px solid #e0e0e0;
-                }
-                .detail-label {
-                    color: #666;
-                    font-size: 13px;
+                    color: #888;
+                    font-size: 12px;
+                    text-transform: uppercase;
                     margin-bottom: 5px;
                 }
-                .detail-value {
-                    color: #333;
+                .stat-value {
+                    font-size: 28px;
+                    font-weight: bold;
+                    color: white;
+                }
+                .stat-unit {
+                    font-size: 14px;
+                    color: #666;
+                    margin-left: 5px;
+                }
+                .section {
+                    background: #2d2d2d;
+                    border-radius: 12px;
+                    padding: 20px;
+                    margin: 20px 0;
+                    border: 1px solid #404040;
+                }
+                .section h2 {
+                    color: white;
+                    margin-bottom: 15px;
                     font-size: 18px;
-                    font-weight: 600;
-                }
-                .actions {
                     display: flex;
-                    gap: 15px;
-                    justify-content: center;
-                }
-                .btn {
-                    padding: 12px 30px;
-                    border: none;
-                    border-radius: 25px;
-                    font-size: 16px;
-                    font-weight: 600;
-                    cursor: pointer;
-                    transition: all 0.3s;
-                    display: inline-flex;
                     align-items: center;
                     gap: 8px;
                 }
-                .btn-primary {
-                    background: linear-gradient(135deg, #667eea, #764ba2);
+                .integrity-meter {
+                    background: #1e1e1e;
+                    border-radius: 8px;
+                    padding: 15px;
+                }
+                .meter-bar {
+                    height: 20px;
+                    background: #404040;
+                    border-radius: 10px;
+                    overflow: hidden;
+                    margin: 10px 0;
+                }
+                .meter-fill {
+                    height: 100%;
+                    background: linear-gradient(90deg, #4CAF50, #8BC34A);
+                    border-radius: 10px;
+                    width: ${integrityScore}%;
+                    transition: width 0.5s;
+                }
+                .verdict-box {
+                    background: ${verdictColor};
+                    border-radius: 12px;
+                    padding: 25px;
+                    margin: 20px 0;
                     color: white;
-                    box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-                }
-                .btn-primary:hover {
-                    transform: translateY(-2px);
-                    box-shadow: 0 8px 25px rgba(102, 126, 234, 0.5);
-                }
-                .btn-secondary {
-                    background: white;
-                    color: #667eea;
-                    border: 2px solid #667eea;
-                }
-                .btn-secondary:hover {
-                    background: #f0f0f0;
-                    transform: translateY(-2px);
-                }
-                .timestamp {
                     text-align: center;
-                    color: #999;
+                }
+                .verdict-box h2 {
+                    font-size: 24px;
+                    margin-bottom: 10px;
+                }
+                .timeline-container {
+                    max-height: 300px;
+                    overflow-y: auto;
+                    background: #1e1e1e;
+                    border-radius: 8px;
+                    padding: 10px;
+                }
+                .typing-graph {
+                    display: flex;
+                    align-items: flex-end;
+                    height: 70px;
+                    gap: 2px;
+                    margin: 20px 0;
+                    background: #1e1e1e;
+                    padding: 10px;
+                    border-radius: 8px;
+                }
+                .btn {
+                    background: #007acc;
+                    color: white;
+                    border: none;
+                    padding: 12px 30px;
+                    border-radius: 25px;
+                    font-size: 16px;
+                    cursor: pointer;
+                    transition: all 0.3s;
+                    margin: 10px;
+                }
+                .btn:hover {
+                    background: #005a9e;
+                    transform: translateY(-2px);
+                    box-shadow: 0 5px 15px rgba(0,122,204,0.4);
+                }
+                .btn-container {
+                    display: flex;
+                    justify-content: center;
+                    gap: 15px;
+                    margin: 30px 0;
+                }
+                .footer {
+                    color: #666;
+                    text-align: center;
                     font-size: 12px;
-                    margin-top: 20px;
+                    margin-top: 30px;
+                    padding-top: 20px;
+                    border-top: 1px solid #404040;
                 }
             </style>
         </head>
         <body>
-            <div class="report-card">
+            <div class="report-container">
+                <!-- Header -->
                 <div class="header">
-                    <div class="header-icon">📋</div>
-                    <div class="header-title">
-                        <h1>Interview Session Report</h1>
-                        <p>Session ID: ${report.sessionId}</p>
+                    <h1>
+                        📋 CodeMentor Interview Report
+                    </h1>
+                    <div class="session-id">
+                        Session: ${sessionId} • ${new Date().toLocaleDateString()}
                     </div>
                 </div>
                 
+                <!-- Quick Stats -->
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div class="stat-icon">⏱️</div>
-                        <div class="stat-value">${report.durationMinutes}</div>
-                        <div class="stat-label">Minutes</div>
+                        <div class="stat-label">Duration</div>
+                        <div class="stat-value">${duration}<span class="stat-unit">min</span></div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-icon">⌨️</div>
-                        <div class="stat-value">${report.totalKeystrokes}</div>
                         <div class="stat-label">Keystrokes</div>
+                        <div class="stat-value">${totalKeystrokes}</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-icon">⏸️</div>
-                        <div class="stat-value">${report.pauses}</div>
                         <div class="stat-label">Pauses</div>
+                        <div class="stat-value">${pauses}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📊</div>
+                        <div class="stat-label">Integrity</div>
+                        <div class="stat-value">${Math.round(integrityScore)}<span class="stat-unit">%</span></div>
                     </div>
                 </div>
                 
-                <div class="progress-section">
-                    <div class="progress-item">
-                        <div class="progress-header">
-                            <span>🤖 AI Probability</span>
-                            <span>${report.aiProbability}%</span>
+                <!-- Integrity Section -->
+                <div class="section">
+                    <h2>🛡️ Integrity Metrics</h2>
+                    <div class="integrity-meter">
+                        <div style="display: flex; justify-content: space-between; color: white; margin-bottom: 5px;">
+                            <span>🚫 Paste Attempts: ${pasteAttempts}</span>
+                            <span>👁️ Focus Losses: ${focusLosses}</span>
+                            <span>🤖 AI Probability: ${aiProbability}%</span>
                         </div>
-                        <div class="progress-bar-bg">
-                            <div class="progress-bar-fill" style="width: ${report.aiProbability}%; background: ${aiBarColor};"></div>
-                        </div>
-                    </div>
-                    
-                    <div class="progress-item">
-                        <div class="progress-header">
-                            <span>🚫 Paste Attempts</span>
-                            <span>${report.pasteAttempts}</span>
-                        </div>
-                        <div class="progress-bar-bg">
-                            <div class="progress-bar-fill" style="width: ${Math.min(report.pasteAttempts * 33, 100)}%; background: #ff9800;"></div>
+                        <div class="meter-bar">
+                            <div class="meter-fill"></div>
                         </div>
                     </div>
                 </div>
                 
+                <!-- Typing Analysis -->
+                <div class="section">
+                    <h2>⌨️ Typing Analysis</h2>
+                    <div style="display: flex; justify-content: space-between; color: white; margin-bottom: 15px;">
+                        <span>Average Speed: ${avgKeystrokes} keys/min</span>
+                        <span>Files Opened: ${filesOpened}</span>
+                        <span>Errors: ${errorsDetected}</span>
+                    </div>
+                    ${typingGraphHtml ? `
+                        <div class="typing-graph">
+                            ${typingGraphHtml}
+                        </div>
+                    ` : ''}
+                </div>
+                
+                <!-- Timeline -->
+                <div class="section">
+                    <h2>📋 Activity Timeline</h2>
+                    <div class="timeline-container">
+                        ${timelineHtml}
+                    </div>
+                </div>
+                
+                <!-- Verdict -->
                 <div class="verdict-box">
-                    <h2>${verdictEmoji} ${report.verdict}</h2>
-                    <p>Based on analysis of ${report.totalKeystrokes} keystrokes over ${report.durationMinutes} minutes</p>
+                    <h2>${verdict}</h2>
+                    <p>Based on analysis of ${totalKeystrokes} keystrokes over ${duration} minutes</p>
                 </div>
                 
-                <div class="details-grid">
-                    <div class="detail-item">
-                        <div class="detail-label">Start Time</div>
-                        <div class="detail-value">${new Date(report.startTime).toLocaleTimeString()}</div>
-                    </div>
-                    <div class="detail-item">
-                        <div class="detail-label">End Time</div>
-                        <div class="detail-value">${new Date(report.endTime).toLocaleTimeString()}</div>
-                    </div>
-                    <div class="detail-item">
-                        <div class="detail-label">Date</div>
-                        <div class="detail-value">${new Date(report.startTime).toLocaleDateString()}</div>
-                    </div>
-                    <div class="detail-item">
-                        <div class="detail-label">AI Confidence</div>
-                        <div class="detail-value">${Math.abs(report.aiProbability - 50) * 2}%</div>
-                    </div>
-                </div>
-                
-                <div class="actions">
-                    <button class="btn btn-primary" onclick="exportPDF()">
-                        📥 Export PDF
-                    </button>
-                    <button class="btn btn-secondary" onclick="printReport()">
-                        🖨️ Print
+                <!-- Single Export Button -->
+                <div class="btn-container">
+                    <button class="btn" onclick="exportReport()">
+                        📥 Export Report (JSON)
                     </button>
                 </div>
                 
-                <div class="timestamp">
-                    Generated by CodeMentor • ${new Date().toLocaleString()}
+                <div class="footer">
+                    ⚡ Generated by CodeMentor • All data stored locally • ${new Date().toLocaleString()}
                 </div>
             </div>
             
             <script>
-                function exportPDF() {
+                const vscode = acquireVsCodeApi();
+                
+                function exportReport() {
                     vscode.postMessage({ command: 'exportPDF' });
-                }
-                function printReport() {
-                    window.print();
                 }
             </script>
         </body>
         </html>
     `;
 }
-
-const endSessionCommand = vscode.commands.registerCommand('CodeMentor.endInterviewSession', async () => {
-    if (!activeSession) {
-        vscode.window.showErrorMessage('No active interview session');
-        return;
-    }
-    
-    // End session
-    activeSession.endTime = new Date();
-    
-    // Get current code for AI analysis
-    const editor = vscode.window.activeTextEditor;
-    if (editor) {
-        const code = editor.document.getText();
-        activeSession.aiDetectionScore = await detectAIGenerated(code);
-    }
-    
-    // Generate report
-    const report = generateReport(activeSession);
-    
-    // Show report
-    showReportPanel(report);
-    
-    // Save report to file
-    saveReportToFile(report);
-    
-    // Clear session
-    activeSession = null;
-    vscode.window.showInformationMessage('Interview session ended. Report generated.');
-});
-
-
 
 // ===========================================
 // SAVE REPORT TO FILE FUNCTION
@@ -1059,4 +1509,22 @@ function saveReportToFile(report: any) {
     }
 }
 
-export function deactivate() {}
+export function deactivate() {
+    // Clean up status bar
+    if (statusBarItem) {
+        statusBarItem.dispose();
+    }
+    
+    // Clean up other disposables
+    if (pauseTimeout) {
+        clearTimeout(pauseTimeout);
+    }
+    
+    if (focusDisposable) {
+        focusDisposable.dispose();
+    }
+    
+    if (keystrokeDisposable) {
+        keystrokeDisposable.dispose();
+    }
+}

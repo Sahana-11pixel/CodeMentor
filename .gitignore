@@ -1,5 +1,19 @@
-out
-dist
-node_modules
+# Node modules
+node_modules/
+out/
+dist/
+
+# VS Code
 .vscode-test/
+.vscode/.test/
+
+# Reports
+reports/
+*.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Extension files
 *.vsix
