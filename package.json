@@ -1,0 +1,72 @@
+{
+  "name": "CodeMentor",
+  "displayName": "CodeMentor",
+  "description": "AI Powered coding tutor that analyzes code on demand and provides personalized learning feedback",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.109.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:CodeMentor.helloWorld",
+    "onCommand:CodeMentor.analyze",
+    "onCommand:CodeMentor.generateInterviewCode",
+    "onCommand:CodeMentor.enterInterviewCode",
+    "onCommand:CodeMentor.endInterviewSession",
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "CodeMentor.helloWorld",
+        "title": "Hello World",
+        "category": "CodeMentor"
+      },
+      {
+        "command": "CodeMentor.analyze",
+        "title": "Analyze Code",
+        "category": "CodeMentor"
+      },
+      {
+        "command": "CodeMentor.generateInterviewCode",
+        "title": "Generate Interview Code",
+        "category": "CodeMentor Interview"
+      },
+      {
+        "command": "CodeMentor.enterInterviewCode",
+        "title": "Enter Interview Code",
+        "category": "CodeMentor Interview"
+      },
+      {
+        "command": "CodeMentor.endInterviewSession",
+        "title": "End Interview Session",
+        "category": "CodeMentor Interview"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/vscode": "^1.109.0",
+    "@typescript-eslint/eslint-plugin": "^8.39.0",
+    "@typescript-eslint/parser": "^8.39.0",
+    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.32.0",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "ollama": "^0.5.0"
+  }
+}
