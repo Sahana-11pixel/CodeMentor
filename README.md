@@ -1,4 +1,3 @@
-## ✅ **Here's the Complete README in Simple English**
 
 ---
 
