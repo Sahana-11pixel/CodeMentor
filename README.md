@@ -218,4 +218,4 @@ ollama run llama3.2 "Hello"
 
 ---
 
-**This README is now complete and in simple English!** 🚀
+
