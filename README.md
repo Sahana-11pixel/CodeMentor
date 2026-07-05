@@ -96,7 +96,7 @@ ollama run llama3.2 "Hello"
 
 ## 🚀 **How to Install CodeMentor**
 
-### **Method 1: Install from VSIX file (Easy)**
+### **Method 1: Install from VSIX file **
 
 1. Download the `CodeMentor-1.0.0.vsix` file here -> https://drive.google.com/file/d/1JamniMK9EQjOjR9lAKhlcVtw6KssCral/view?usp=sharing
 2. Open VS Code 
@@ -106,7 +106,7 @@ ollama run llama3.2 "Hello"
 6. Click Install
 7. Restart VS Code
 
-### **Method 2: Install from VS Code Marketplace (Coming Soon)**
+### **Method 2: Install from VS Code Marketplace (Easy)**
 
 1. Open VS Code
 2. Go to Extensions (`Ctrl+Shift+X`)
